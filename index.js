@@ -13,35 +13,69 @@ app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
 
-app.post('/salt', async (req, res) => {
-  redis = getRedisClient()
-  const salt = uuid()
-  const address = url.searchParams.get('address')
-  if (address == null) throw error(400, 'Missing address.')
-  await redis.set(`salt:${getAddress(address)}`, salt, { EX: 2592000 })
-  return json({
-    success: true,
-    salt: salt,
-  })
+app.post('/add', async (req, res) => {
+  try {
+    const header = req.headers.authorization
+    if (!header) throw error(401, 'Missing authorization header.')
+    const token = header.split(' ')[1]
+    if (!token) throw error(401, 'Missing token.')
+    if (token !== process.env.TOKEN) throw error(401, 'Invalid token.')
+    const address = req.params.address
+    if (!address) throw error(400, 'Missing address.')
+    const role = req.params.role
+    if (!role) throw error(400, 'Missing role.')
+    await redis.set(`role:${getAddress(address)}`, salt, { EX: 2592000 })
+    return res.json({ success: true })
+  } catch (error) {
+    console.error('Error:', error)
+    return res.status(error.status || 500).json({ success: false, message: error.message })
+  }
 })
 
+app.post('/salt/:address', async (req, res) => {
+  try {
+    const redis = getRedisClient();
+    const salt = uuid();
+    const address = req.params.address;
+    if (!address) {
+      return res.status(400).json({ success: false, message: 'Missing address.' });
+    }
+    await redis.set(`salt:${getAddress(address)}`, salt, { EX: 300 });
+    return res.json({
+      success: true,
+      salt: salt,
+    });
+  } catch (error) {
+    console.error('Error:', error);
+    return res.status(500).json({ success: false, message: 'Internal Server Error' });
+  }
+});
+
+const handleRoleUpdate = async (address) => { }
+
 app.post('/verify', async (req, res) => {
-  redis = getRedisClient()
-  const address = url.searchParams.get('address')
-  const signature = url.searchParams.get('signature')
-  if (!address || !signature) throw error(400, 'Missing address or signature.')
-  const salt = (await redis.get(`salt:${getAddress(address)}`))
-  const client = createPublicClient({
-    chain: config.chains.find((c) => c.id === getChainId(config)),
-    transport: http(),
-  })
-  const valid = await client.verifyMessage({
-    address: address,
-    message: messageForSalt(salt),
-    signature: signature
-  })
-  if (!valid) throw error(400, 'Invalid signature.')
-  // check for role to give
+  try {
+    redis = getRedisClient()
+    const address = url.searchParams.get('address')
+    const signature = url.searchParams.get('signature')
+    if (!address || !signature) throw error(400, 'Missing address or signature.')
+    const salt = (await redis.get(`salt:${getAddress(address)}`))
+    const client = createClient({
+      chain: config.chains.find((c) => c.id === getChainId(config)),
+      transport: http(),
+    })
+    const valid = await client.verifyMessage({
+      address: address,
+      message: messageForSalt(salt),
+      signature: signature
+    })
+    if (!valid) throw error(400, 'Invalid signature.')
+    await redis.del(`salt:${getAddress(address)}`)
+    handleRoleUpdate(address)
+    return res.json({ success: true })
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Internal Server Error' });
+  }
 })
 
 client.on('messageCreate', async (message) => {
