@@ -11,6 +11,10 @@
   "dependencies": {
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
-    "ethers": "^6.13.4"
+    "ethers": "^6.13.4",
+    "express": "^4.21.1",
+    "redis": "^4.7.0",
+    "uuid": "^11.0.2",
+    "viem": "^2.21.38"
   }
 }
