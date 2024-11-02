@@ -9,6 +9,8 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@discordjs/builders": "^1.9.0",
+    "cors": "^2.8.5",
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
     "ethers": "^6.13.4",
@@ -16,5 +18,9 @@
     "redis": "^4.7.0",
     "uuid": "^11.0.2",
     "viem": "^2.21.38"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0"
   }
 }
