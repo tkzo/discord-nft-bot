@@ -37,6 +37,13 @@ const nftAbi = [
     stateMutability: "view",
     type: "function",
   },
+  {
+    inputs: [],
+    name: "name",
+    outputs: [{ internalType: "string", name: "", type: "string" }],
+    stateMutability: "view",
+    type: "function",
+  },
 ];
 let redis = await getRedisClient();
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
@@ -57,6 +64,7 @@ const corsOptionsDelegate = (req, callback) => {
   callback(null, corsOptions);
 };
 app.use(cors(corsOptionsDelegate));
+let interactionCache = [];
 
 // BOT
 
@@ -70,79 +78,109 @@ client.on("error", (error) => {
 });
 client.on("interactionCreate", async (interaction) => {
   try {
-    switch (interaction.commandName) {
-      case "add_role":
-        await handleAddRoleCommand(interaction);
-        return;
-      case "start":
-        await sendInitialMessage(interaction.channelId);
-        return;
-    }
-    switch (interaction.customId) {
-      case "verify":
-        await handleVerifyCommand(interaction);
-      case "addWallet":
-        await handleAddWalletCommand(interaction);
-      case "listWallets":
-        await handleListWalletsCommand(interaction);
+    if (interaction.commandName == "add_role") {
+      await handleAddRoleCommand(interaction);
+    } else if (interaction.commandName == "start") {
+      await handleStartCommand(interaction);
+    } else if (interaction.customId == "verify") {
+      await handleVerifyCommand(interaction);
+    } else if (interaction.customId == "addWallet") {
+      await handleAddWalletCommand(interaction);
+    } else if (interaction.customId == "listWallets") {
+      await handleListWalletsCommand(interaction);
     }
   } catch (error) {
-    console.error(error);
-    await replyToInteraction(interaction, "An error occurred.");
+    console.error("Interaction error:", error);
+    await interaction.followUp({ content: "An error occurred.", ephemeral: true });
   }
 });
 
-const handleAddWalletCommand = async (interaction) => {
-  try {
-    const userId = interaction.user.id;
-    const guildId = interaction.guild.id;
-    const salt = uuid();
-    await redis.set(`salt:${userId}`, salt, { EX: 300 });
-    const url = `${process.env.APP_DOMAIN}?guildId=${guildId}&userId=${userId}`;
-    await replyToInteraction(interaction, `Click here: ${url}`);
-  } catch (error) {
-    console.error("Error:", error);
-    await replyToInteraction(interaction, "An error occurred.");
+const handleStartCommand = async (interaction) => {
+  const userId = interaction.user.id;
+  if (userId !== adminId) {
+    return await interaction.reply({ content: "You are not authorized to use this command.", ephemeral: true });
   }
+  const guild = await client.guilds.fetch(interaction.guildId);
+  await interaction.reply({
+    content: `Bot online for ${guild.name}. Don't forget to add some roles using /add_role command!`,
+    ephemeral: true,
+  });
+  const channel = await client.channels.fetch(interaction.channelId);
+  if (channel.isTextBased()) {
+    const button = new ButtonBuilder().setCustomId("verify").setLabel("Verify").setStyle(ButtonStyle.Primary);
+    const addAnotherButton = new ButtonBuilder()
+      .setCustomId("addWallet")
+      .setLabel("Add Another Wallet")
+      .setStyle(ButtonStyle.Secondary);
+    const listWalletsButton = new ButtonBuilder()
+      .setCustomId("listWallets")
+      .setLabel("List Wallets")
+      .setStyle(ButtonStyle.Secondary);
+    const row = new ActionRowBuilder()
+      .addComponents(button)
+      .addComponents(addAnotherButton)
+      .addComponents(listWalletsButton);
+    await channel.send({ content: "Welcome.", components: [row] });
+  } else {
+    throw new Error("Channel is not text based.");
+  }
+};
+
+const handleAddWalletCommand = async (interaction) => {
+  const userId = interaction.user.id;
+  const guildId = interaction.guild.id;
+  const salt = uuid();
+  await redis.set(`salt:${userId}`, salt, { EX: 300 });
+  interactionCache.push(interaction);
+  const url = `${process.env.APP_DOMAIN}?guildId=${guildId}&userId=${userId}`;
+  await interaction.reply(`Click here: ${url}`, { ephemeral: true });
 };
 
 const handleListWalletsCommand = async (interaction) => {
-  try {
-    const userId = interaction.user.id;
-    const addresses = await redis.hGetAll(`user:${userId}`);
-    await replyToInteraction(interaction, Object.keys(addresses).join("\n"));
-  } catch (error) {
-    console.error("Error:", error);
-    await replyToInteraction(interaction, "An error occurred.");
-  }
+  const userId = interaction.user.id;
+  const addresses = await redis.hGetAll(`user:${userId}`);
+  await interaction.reply({ content: Object.keys(addresses).join("\n"), ephemeral: true });
 };
 
 const handleVerifyCommand = async (interaction) => {
-  try {
-    const userId = interaction.user.id;
-    const addresses = await redis.hGetAll(`user:${userId}`);
-    if (Object.keys(addresses).length > 0) {
-      await interaction.reply({ content: "Verification complete.", ephemeral: true });
-    } else {
-      await handleAddWalletCommand(interaction);
+  const userId = interaction.user.id;
+  const addresses = await redis.hGetAll(`user:${userId}`);
+  if (Object.keys(addresses).length > 0) {
+    await interaction.deferReply({ ephemeral: true });
+    let total = 0;
+    for await (const [address] of Object.entries(addresses)) {
+      const updated = await updateRole(address, interaction);
+      total += updated;
     }
-  } catch (error) {
-    console.error("Error:", error);
-    await interaction.reply({ content: "An error occurred.", ephemeral: true });
+    if (total == 0) {
+      await interaction.followUp({ content: "No new roles added.", ephemeral: true });
+    } else {
+      await interaction.followUp({
+        content: `Verification complete, assigned ${total} new roles.`,
+        ephemeral: true,
+      });
+    }
+  } else {
+    await handleAddWalletCommand(interaction);
   }
 };
 
 const handleAddRoleCommand = async (interaction) => {
   const userId = interaction.user.id;
   if (userId !== adminId) {
-    return await replyToInteraction(interaction, "You are not authorized to use this command.");
+    return await interaction.reply({ content: "You are not authorized to use this command.", ephemeral: true });
   }
   const address = interaction.options.getString("address");
   const count = interaction.options.getInteger("count");
   const chainId = interaction.options.getInteger("chainid");
   const roleId = interaction.options.getString("roleid");
+  const guild = await client.guilds.fetch(interaction.guildId);
+  const role = await guild.roles.fetch(roleId);
   await redis.hSet(`guild:${interaction.guildId}`, roleId, JSON.stringify({ address, count, chainId }));
-  await replyToInteraction(interaction, "Role added.");
+  await interaction.reply({
+    content: `Role added for address ${address} on chain ${chainId} with count ${count} granting ${role.name} role.`,
+    ephemeral: true,
+  });
 };
 
 // API
@@ -166,7 +204,7 @@ app.get("/message", async (req, res) => {
       message: getMessage(salt),
     });
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Endpoint error(/message):", error);
     return res.status(500).json({ success: false, message: "Internal Server Error" });
   }
 });
@@ -188,87 +226,81 @@ app.post("/verify", async (req, res) => {
     if (!valid) return res.status(400).json({ success: false, message: "Invalid signature." });
     await redis.del(`salt:${userId}`);
     await redis.hSet(`user:${userId}`, address, signature);
-    await handleRoleUpdate(address, guildId, userId);
+    const interaction = interactionCache.find((interaction) => {
+      if (interaction.user.id === userId) {
+        return interaction;
+      }
+    });
+    await updateRole(address, interaction);
+    removeInteractionFromCache(interaction);
     return res.json({ success: true });
   } catch (error) {
-    console.error(error);
+    console.error("Endpoint error(/verify):", error);
     return res.status(500).json({ success: false, message: "Internal Server Error" });
   }
 });
+
+const removeInteractionFromCache = (interaction) => {
+  const index = interactionCache.findIndex((i) => i.id === interaction.id);
+  if (index > -1) {
+    interactionCache.splice(index, 1);
+  }
+};
 
 const getMessage = (salt) => {
   return `Please sign this message to verify your address: ${salt}`;
 };
 
-const handleRoleUpdate = async (address, guildId, userId) => {
-  const roles = await getRolesForAddress(guildId, address);
-  const guild = await client.guilds.fetch(guildId);
-  const member = await guild.members.fetch(userId);
-  for await (const r of roles) {
-    const role = await guild.roles.fetch(r);
-    if (member.roles.cache.has(role.id)) continue;
+const updateRole = async (address, interaction) => {
+  const deserveds = await getRolesForAddress(interaction, address);
+  let count = 0;
+  if (deserveds.length == 0) {
+    return count;
+  }
+  const guild = await client.guilds.fetch(interaction.guildId);
+  const member = await guild.members.fetch(interaction.user.id);
+  for await (const deserved of deserveds) {
+    const role = await guild.roles.fetch(deserved.roleId);
+    if (member.roles.cache.has(role.id)) {
+      continue;
+    }
     await member.roles.add(role);
+    await interaction.followUp({ content: `${deserved.name} NFT granted you ${role.name} 🥳`, ephemeral: true });
+    count++;
   }
+  return count;
 };
 
-const getRolesForAddress = async (guildId, userAddress) => {
+const getRolesForAddress = async (interaction, userAddress) => {
   let deservedRoles = [];
-  try {
-    const roles = await redis.hGetAll(`guild:${guildId}`);
-    if (Object.keys(roles).length === 0) {
-      return [];
-    }
-    for (const [roleId, data] of Object.entries(roles)) {
-      const { address: nftAddress, count, chainId } = JSON.parse(data);
-      const publicClient = createPublicClient({
-        chain: allowedChains[chainId],
-        transport: http(),
-      });
-      const nft = getContract({
-        address: nftAddress,
-        abi: nftAbi,
-        client: publicClient,
-      });
-      const balance = await nft.read.balanceOf([userAddress]);
-      if (balance >= count) {
-        deservedRoles.push(roleId);
-      }
-    }
-  } catch (error) {
-    console.error("Error:", error);
-    throw error;
-  } finally {
-    return deservedRoles;
+  const roles = await redis.hGetAll(`guild:${interaction.guildId}`);
+  if (Object.keys(roles).length === 0) {
+    await interaction.followUp({ content: "No roles found for this guild.", ephemeral: true });
+    return [];
   }
+  for (const [roleId, data] of Object.entries(roles)) {
+    const { address: nftAddress, count, chainId } = JSON.parse(data);
+    const publicClient = createPublicClient({
+      chain: allowedChains[chainId],
+      transport: http(),
+    });
+    const nft = getContract({
+      address: nftAddress,
+      abi: nftAbi,
+      client: publicClient,
+    });
+    const name = await nft.read.name();
+    const balance = await nft.read.balanceOf([userAddress]);
+    if (balance >= count) {
+      deservedRoles.push({ roleId, name });
+    }
+  }
+  return deservedRoles;
 };
 
-const sendInitialMessage = async (channelId) => {
-  try {
-    const channel = await client.channels.fetch(channelId);
-    if (channel.isTextBased()) {
-      const button = new ButtonBuilder()
-        .setCustomId("verify")
-        .setLabel("Register Wallet")
-        .setStyle(ButtonStyle.Primary);
-      const addAnotherButton = new ButtonBuilder()
-        .setCustomId("addWallet")
-        .setLabel("Add Another Wallet")
-        .setStyle(ButtonStyle.Secondary);
-      const listWalletsButton = new ButtonBuilder()
-        .setCustomId("listWallets")
-        .setLabel("List Wallets")
-        .setStyle(ButtonStyle.Secondary);
-      const row = new ActionRowBuilder()
-        .addComponents(button)
-        .addComponents(addAnotherButton)
-        .addComponents(listWalletsButton);
-      await channel.send({ content: "Welcome.", components: [row] });
-    } else {
-      throw new Error("Channel is not text based.");
-    }
-  } catch (error) {
-    console.error("Error fetching the channel or sending the message:", error);
-  }
+const registerCommands = async () => {
+  await registerAddRoleCommand();
+  await registerStartCommand();
 };
 
 const registerAddRoleCommand = async () => {
@@ -282,20 +314,7 @@ const registerAddRoleCommand = async () => {
   await client.application.commands.create(data);
 };
 
-const registerCommands = async () => {
-  await registerAddRoleCommand();
-  await registerStartCommand();
-};
-
 const registerStartCommand = async () => {
   const data = new SlashCommandBuilder().setName("start").setDescription("Start verification for the current server");
   await client.application.commands.create(data);
-};
-
-const replyToInteraction = async (interaction, content) => {
-  try {
-    await interaction.reply({ content, ephemeral: true });
-  } catch (error) {
-    console.error("Error:", error);
-  }
 };
